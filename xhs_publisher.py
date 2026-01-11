@@ -2,8 +2,114 @@ import asyncio
 import json
 import os
 import time
-from typing import List, Dict, Union
+import re
+import base64
+import httpx
+from typing import List, Dict, Union, Optional
 from playwright.async_api import async_playwright, Page, BrowserContext, expect
+
+def load_env(env_path=".env"):
+    """简单的 .env 文件加载器"""
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    os.environ[key.strip()] = value.strip()
+
+async def generate_ai_copywriting(api_key: str, image_paths: List[str], original_title: str, original_desc: str) -> Dict[str, str]:
+    """
+    调用千问 Qwen-VL API 基于图片和原文本生成新文案
+    """
+    print("正在调用 AI 生成新文案...")
+    url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    # 构建消息内容
+    content = []
+    
+    # 添加图片 (限制最多 4 张以避免 token 过大或超时)
+    for img_path in image_paths[:4]: 
+        try:
+            with open(img_path, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode("utf-8")
+                # 获取文件扩展名
+                ext = os.path.splitext(img_path)[1][1:].lower()
+                if ext == "jpg": ext = "jpeg"
+                content.append({"image": f"data:image/{ext};base64,{img_b64}"})
+        except Exception as e:
+            print(f"读取图片失败 {img_path}: {e}")
+
+    # 添加文本提示
+    prompt = f"""
+    你是一个小红书爆款文案专家。请根据提供的图片和原帖内容，重新创作一篇吸引人的小红书笔记。
+    
+    原帖标题：{original_title}
+    原帖内容：{original_desc}
+    
+    要求：
+    1. 标题要吸引眼球，使用emoji，不超过20字。
+    2. 正文语气活泼、真诚，适当使用emoji。
+    3. 保留原帖的核心信息，但换一种表达方式。
+    4. 结尾加上相关的标签（hashtags）。
+    5. 返回格式必须是 JSON，包含 "title" 和 "content" 两个字段。
+    """
+    content.append({"text": prompt})
+
+    payload = {
+        "model": "qwen-vl-max",
+        "input": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": content
+                }
+            ]
+        },
+        "parameters": {
+            "result_format": "message"
+        }
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, headers=headers, json=payload, timeout=60)
+            
+        if response.status_code == 200:
+            result = response.json()
+            if "output" in result and "choices" in result["output"]:
+                ai_text = result["output"]["choices"][0]["message"]["content"][0]["text"]
+                
+                # 尝试解析 JSON
+                # AI 可能会返回带有 markdown 代码块的 json
+                ai_text = ai_text.replace("```json", "").replace("```", "").strip()
+                
+                try:
+                    data = json.loads(ai_text)
+                    print("AI 文案生成成功！")
+                    return data
+                except json.JSONDecodeError:
+                    # 如果不是标准 JSON，尝试手动提取或直接作为 content
+                    print("AI 返回的不是标准 JSON，将直接使用返回文本。")
+                    # 简单分割标题和内容
+                    lines = ai_text.split("\n", 1)
+                    return {
+                        "title": lines[0].strip()[:20], # 截取一下防止过长
+                        "content": ai_text
+                    }
+            else:
+                print(f"AI API 返回结构异常: {result}")
+        else:
+            print(f"AI API 请求失败: {response.status_code} - {response.text}")
+            
+    except Exception as e:
+        print(f"调用 AI API 出错: {e}")
+
+    return None
 
 class XhsPublisher:
     def __init__(self, cookie_file: str = "cookies.json"):
@@ -243,76 +349,103 @@ class XhsPublisher:
         if self.browser_context:
             await self.browser_context.close()
 
+async def main():
+    # 加载环境变量
+    load_env()
+    api_key = os.environ.get("API_KEY")
+
+    publisher = XhsPublisher()
+    await publisher.start()
+    
+    base_dir = r"e:\python code\python class\final test"
+    
+    # 修改：通过 note_id 获取信息
+    note_id = "67f546dd000000001d003bc7"
+    
+    # 1. 确定图片目录
+    image_dir = os.path.join(base_dir, "data_final", "image", note_id)
+    
+    # 2. 扫描图片
+    images = []
+    if os.path.exists(image_dir):
+        for f in sorted(os.listdir(image_dir)):
+            if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                images.append(os.path.join(image_dir, f))
+    
+    # 3. 获取标题和内容 (从 annotations.json)
+    title = ""
+    content = ""
+    
+    annotations_path = os.path.join(base_dir, "data_final", "annotations.json")
+    if os.path.exists(annotations_path):
+        try:
+            with open(annotations_path, "r", encoding="utf-8") as f:
+                annotations = json.load(f)
+            
+            # 尝试查找对应的笔记信息
+            # 遍历 annotations 寻找匹配 note_id 的条目
+            found_note = False
+            for key, value in annotations.items():
+                # 检查 key 中是否包含 note_id，或者 value['info']['note_id'] 是否匹配
+                # 注意 key 是类似 "data_final\\image\\695e3...\\0.jpg"
+                if note_id in key or (value.get("info") and value["info"].get("note_id") == note_id):
+                    note_content = value.get("content", {})
+                    title = note_content.get("title", "")
+                    content = note_content.get("desc", "")
+                    
+                    # 移除话题标签 (井号包裹的内容)
+                    content = re.sub(r"#[^#]+#", "", content)
+                    content = content.strip()
+                    
+                    # 获取原作者和链接
+                    nickname = value.get("user", {}).get("nickname", "未知作者")
+                    url = value.get("info", {}).get("url", "")
+                    
+                    # 调用 AI 生成新文案
+                    if api_key and images:
+                        ai_result = await generate_ai_copywriting(api_key, images, title, content)
+                        if ai_result:
+                            title = ai_result.get("title", title)
+                            content = ai_result.get("content", content)
+                            print(f"-------- AI 生成的新文案 --------\n标题: {title}\n内容: {content}\n--------------------------------")
+
+                    # 添加声明信息 (润色后)
+                    disclaimer = f"\n\n--------------------\n原作者：{nickname}\n原帖链接：{url}\n\n⚠️ 声明：本内容仅作为 Python 爬虫与 AI 自动化技术的学习演示。文案由 AI 基于原帖内容重写，仅供参考。引用内容版权归原作者所有，如有侵权请联系删除。"
+                    content += disclaimer
+                    
+                    found_note = True
+                    print(f"最终待发布的笔记信息:\n标题: {title}\n内容摘要: {content[:20]}...")
+                    break
+            
+            if not found_note:
+                print(f"Warning: 在 annotations.json 中未找到 note_id={note_id} 的信息，将使用默认/空值。")
+                
+        except Exception as e:
+            print(f"读取 annotations.json 失败: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+            print(f"Warning: annotations.json 不存在: {annotations_path}")
+
+    
+    if images:
+        print(f"找到 {len(images)} 张图片: {images}")
+        # dry_run=True 表示只填充不发布
+        await publisher.publish_note(
+            image_paths=images,
+            title=title,
+            content=content,
+            dry_run=True 
+        )
+    else:
+        print(f"未在 {image_dir} 找到图片，仅启动浏览器演示登录。")
+        await publisher.check_login()
+
+    # 保持浏览器打开一会以便观察
+    print("脚本执行完毕，浏览器将保持打开状态 120 秒...")
+    await asyncio.sleep(120)
+    await publisher.close()
+
 # 示例调用
 if __name__ == "__main__":
-    async def main():
-        publisher = XhsPublisher()
-        await publisher.start()
-        
-        base_dir = r"e:\python code\python class\final test"
-        
-        # 修改：通过 note_id 获取信息
-        note_id = "67f546dd000000001d003bc7"
-        
-        # 1. 确定图片目录
-        image_dir = os.path.join(base_dir, "data_final", "image", note_id)
-        
-        # 2. 扫描图片
-        images = []
-        if os.path.exists(image_dir):
-            for f in sorted(os.listdir(image_dir)):
-                if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
-                    images.append(os.path.join(image_dir, f))
-        
-        # 3. 获取标题和内容 (从 annotations.json)
-        title = ""
-        content = ""
-        
-        annotations_path = os.path.join(base_dir, "data_final", "annotations.json")
-        if os.path.exists(annotations_path):
-            try:
-                with open(annotations_path, "r", encoding="utf-8") as f:
-                    annotations = json.load(f)
-                
-                # 尝试查找对应的笔记信息
-                # 遍历 annotations 寻找匹配 note_id 的条目
-                found_note = False
-                for key, value in annotations.items():
-                    # 检查 key 中是否包含 note_id，或者 value['info']['note_id'] 是否匹配
-                    # 注意 key 是类似 "data_final\\image\\695e3...\\0.jpg"
-                    if note_id in key or (value.get("info") and value["info"].get("note_id") == note_id):
-                        note_content = value.get("content", {})
-                        title = note_content.get("title", "")
-                        content = note_content.get("desc", "")
-                        found_note = True
-                        print(f"从 annotations.json 成功获取笔记信息:\n标题: {title}\n内容摘要: {content[:20]}...")
-                        break
-                
-                if not found_note:
-                    print(f"Warning: 在 annotations.json 中未找到 note_id={note_id} 的信息，将使用默认/空值。")
-                    
-            except Exception as e:
-                print(f"读取 annotations.json 失败: {e}")
-        else:
-             print(f"Warning: annotations.json 不存在: {annotations_path}")
-
-        
-        if images:
-            print(f"找到 {len(images)} 张图片: {images}")
-            # dry_run=True 表示只填充不发布
-            await publisher.publish_note(
-                image_paths=images,
-                title=title,
-                content=content,
-                dry_run=True 
-            )
-        else:
-            print(f"未在 {image_dir} 找到图片，仅启动浏览器演示登录。")
-            await publisher.check_login()
-
-        # 保持浏览器打开一会以便观察
-        print("脚本执行完毕，浏览器将保持打开状态 120 秒...")
-        await asyncio.sleep(120)
-        await publisher.close()
-
     asyncio.run(main())
