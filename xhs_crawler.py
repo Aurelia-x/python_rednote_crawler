@@ -3,10 +3,11 @@ import asyncio
 import json
 import os
 import sys
+import re
 import hashlib
 import time
 from typing import Any, Dict, Optional, Union
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote, parse_qs
 import httpx
 from playwright.async_api import async_playwright, Page
 from loguru import logger
@@ -264,14 +265,80 @@ class XhsCrawler:
         else:
             raise Exception(f"API 请求失败: {data.get('msg', '未知错误')}")
 
+    async def get_note_detail(self, note_id: str, xsec_token: str) -> Optional[Dict]:
+        logger.info(f"正在获取笔记详情: {note_id}")
+
+        # 1. 发起API请求
+        # detail_url = f"https://www.xiaohongshu.com/explore/{note_id}?xsec_token={xsec_token}&xsec_source=pc_search"
+        # logger.info(f"正在导航到笔记详情页: {detail_url}")
+        # try:
+        #     await self.page.goto(detail_url, wait_until="domcontentloaded")
+        #     await asyncio.sleep(random.uniform(2, 4)) # 等待页面加载
+        #     logger.info("笔记详情页导航成功。")
+        # except Exception as e:
+        #     logger.error(f"导航到笔记 {note_id} 详情页失败: {e}")
+        #     return None
+        uri = "/api/sns/web/v1/feed"
+        data = {
+            "source_note_id": note_id,
+            "image_formats": ["jpg", "webp", "avif"],
+            "extra": {"need_body_topic": "1"},
+            "xsec_source": "pc_search",
+            "xsec_token": xsec_token
+        }
+        a1_value = self.cookie_dict.get("a1", "")
+        
+        try:
+            signs = await sign_with_playwright(self.page, uri, data, a1_value, "POST")
+            headers = {
+                "Content-Type": "application/json;charset=UTF-8",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "X-S": signs["x-s"],
+                "X-T": signs["x-t"],
+                "x-S-Common": signs["x-s-common"],
+                "X-B3-Traceid": signs["x-b3-traceid"],
+                "Cookie": "; ".join([f"{k}={v}" for k, v in self.cookie_dict.items()]),
+            }
+            json_str = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+            response_data = await self._request(
+                method="POST",
+                url=f"{self._host}{uri}",
+                content=json_str,
+                headers=headers,
+            )
+            
+            # API返回的数据结构可能有多层，需要找到items
+            if "items" in response_data and response_data["items"]:
+                return response_data["items"][0]
+            else:
+                logger.warning(f"笔记 {note_id} 的详情API未返回有效items。")
+                return None
+        except Exception as e:
+            logger.error(f"获取笔记 {note_id} 详情时出错: {e}")
+            return None
+
     async def search(self):
         logger.info(f"开始搜索关键词: {self.keywords}")
+        
+        annotations = {}
+        image_count = 0
+        processed_notes_count = 0
+        data_dir = "data"
+        os.makedirs(data_dir, exist_ok=True)
+
         for keyword in self.keywords:
+            if processed_notes_count >= 10:
+                break
+
             page_num = 1
+            search_id = "".join(random.choice("0123456789abcdef") for _ in range(32))
             while True:
-                logger.info(f"正在搜索 '{keyword}' 的第 {page_num} 页...")
+                if processed_notes_count >= 10:
+                    break
+                logger.info(f"正在 API 搜索 '{keyword}' 的第 {page_num} 页...")
+                
+                # 1. 直接调用搜索API
                 uri = "/api/sns/web/v1/search/notes"
-                search_id = "".join(random.choice("0123456789abcdef") for _ in range(32))
                 data = {
                     "keyword": keyword,
                     "page": page_num,
@@ -282,19 +349,17 @@ class XhsCrawler:
                 }
                 
                 a1_value = self.cookie_dict.get("a1", "")
-                signs = await sign_with_playwright(self.page, uri, data, a1_value, "POST")
-                
-                headers = {
-                    "Content-Type": "application/json;charset=UTF-8",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    "X-S": signs["x-s"],
-                    "X-T": signs["x-t"],
-                    "x-S-Common": signs["x-s-common"],
-                    "X-B3-Traceid": signs["x-b3-traceid"],
-                    "Cookie": "; ".join([f"{k}={v}" for k, v in self.cookie_dict.items()]),
-                }
-
                 try:
+                    signs = await sign_with_playwright(self.page, uri, data, a1_value, "POST")
+                    headers = {
+                        "Content-Type": "application/json;charset=UTF-8",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "X-S": signs["x-s"],
+                        "X-T": signs["x-t"],
+                        "x-S-Common": signs["x-s-common"],
+                        "X-B3-Traceid": signs["x-b3-traceid"],
+                        "Cookie": "; ".join([f"{k}={v}" for k, v in self.cookie_dict.items()]),
+                    }
                     json_str = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
                     response_data = await self._request(
                         method="POST",
@@ -302,30 +367,149 @@ class XhsCrawler:
                         content=json_str,
                         headers=headers,
                     )
-                    
-                    if not response_data or not response_data.get("items"):
-                        logger.info(f"关键词 '{keyword}' 第 {page_num} 页没有更多内容了。")
-                        break
-
-                    # 保存数据
-                    file_path = f"data/xhs_search_{keyword}_page_{page_num}.json"
-                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        json.dump(response_data["items"], f, ensure_ascii=False, indent=4)
-                    logger.info(f"已将 '{keyword}' 第 {page_num} 页的结果保存到 {file_path}")
-
-                    if not response_data.get("has_more"):
-                        logger.info(f"关键词 '{keyword}' 已搜索完毕。")
-                        break
-                    
-                    page_num += 1
-                    await asyncio.sleep(random.uniform(2, 4))
-
+                    logger.info(f"API 响应数据: {json.dumps(response_data, ensure_ascii=False)[:500]}...") # 打印前500个字符用于调试
                 except Exception as e:
-                    logger.error(f"搜索 '{keyword}' 第 {page_num} 页时出错: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.error(f"API 搜索失败: {e}")
+                    break # API搜索失败，终止当前关键词的搜索
+
+                if not response_data or not response_data.get("items"):
+                    logger.info(f"关键词 '{keyword}' 第 {page_num} 页没有更多内容了。")
                     break
+
+                # 2. 遍历搜索结果，提取 xsec_token 并获取详情
+                for item in response_data.get("items", []):
+                    if item.get("model_type") != "note":
+                        continue
+                    if processed_notes_count >= 10:
+                        break
+                    note_id = item.get("id")
+                    if '#' in note_id:
+                        note_id = note_id.split('#')[0]
+                    xsec_token = item.get("xsec_token") # 提取 xsec_token
+                    if not note_id or not xsec_token:
+                        continue
+                    
+                    try:
+                        logger.info(f"准备获取笔记 {note_id} 的详情...")
+                        await asyncio.sleep(random.uniform(3, 6))
+                        # 3. 传入 xsec_token 获取详情
+                        detail_data = await self.get_note_detail(note_id, xsec_token)
+                        if not detail_data:
+                            logger.warning(f"笔记 {note_id} 详情获取失败或为空")
+                            continue
+                        logger.info(f"成功获取笔记 {note_id} 的详情，开始解析...")
+
+                        note_card = detail_data.get("note_card", {})
+                        
+                        # 提取基础信息
+                        text_content = note_card.get("desc", "")
+                        title = note_card.get("title", "")
+                        image_list = note_card.get("image_list", [])
+
+                        # 提取用户信息
+                        user_info = note_card.get("user", {})
+                        user_data = {
+                            "user_id": user_info.get("user_id"),
+                            "nickname": user_info.get("nickname"),
+                            "avatar": user_info.get("avatar"),
+                        }
+                        
+                        # 提取交互信息
+                        interact_info = note_card.get("interact_info", {})
+                        interact_data = {
+                            "liked_count": interact_info.get("liked_count"),
+                            "collected_count": interact_info.get("collected_count"),
+                            "comment_count": interact_info.get("comment_count"),
+                            "share_count": interact_info.get("share_count"),
+                        }
+                        
+                        # 提取标签
+                        tag_list = note_card.get("tag_list", [])
+                        tags = [tag.get("name") for tag in tag_list if tag.get("name")]
+                        
+                        # 提取其他信息
+                        publish_time = note_card.get("time") or note_card.get("publish_time")
+                        last_update_time = note_card.get("last_update_time")
+                        ip_location = note_card.get("ip_location")
+                        
+                        # 构建文件夹路径：data/image/note_id
+                        folder_name = note_id
+                        current_note_dir = os.path.join(data_dir, "image", folder_name)
+                        os.makedirs(current_note_dir, exist_ok=True)
+                        
+                        logger.info(f"笔记 {note_id} 解析: image_list长度={len(image_list)}, text_content长度={len(text_content)}")
+
+                        if not text_content or not image_list:
+                            logger.warning(f"笔记 {note_id} 缺少文本或图片，跳过。")
+                            continue
+                        
+                        note_success = False
+                        for img_info in image_list:
+                            # 优先获取 url，如果没有则尝试 url_default (通常是高质量图)，最后尝试 url_pre
+                            img_url = img_info.get("url") or img_info.get("url_default") or img_info.get("url_pre")
+                            if not img_url:
+                                logger.warning(f"图片信息中未找到有效URL: {img_info}")
+                                continue
+                            
+                            await asyncio.sleep(random.uniform(2, 4))
+                            async with httpx.AsyncClient() as client:
+                                img_response = await client.get(img_url, timeout=60)
+                            img_response.raise_for_status()
+                            
+                            file_name = f"{image_list.index(img_info)}.jpg"
+                            relative_path = os.path.join(current_note_dir, file_name)
+                            
+                            with open(relative_path, "wb") as f:
+                                f.write(img_response.content)
+                            
+                            # 记录相对路径（相对于 data 目录，或者绝对路径？annotations里最好记录清晰的路径）
+                            # 这里记录 relative_path，它是 data/subdir/xxx.jpg
+                            annotations[relative_path] = {
+                                "image_path": relative_path,
+                                "content": {
+                                    "title": title,
+                                    "desc": text_content,
+                                    "tags": tags
+                                },
+                                "user": user_data,
+                                "stats": interact_data,
+                                "info": {
+                                    "note_id": note_id,
+                                    "type": note_card.get("type"),
+                                    "publish_time": publish_time,
+                                    "last_update_time": last_update_time,
+                                    "ip_location": ip_location,
+                                    "url": f"https://www.xiaohongshu.com/explore/{note_id}"
+                                }
+                            }
+                            image_count += 1
+                            logger.info(f"成功下载图片 {relative_path}，当前图文对: {image_count}")
+                            note_success = True
+                        
+                        if note_success:
+                            processed_notes_count += 1
+                            logger.info(f"成功处理完第 {processed_notes_count} 条笔记: {note_id}")
+                            if processed_notes_count >= 10:
+                                break
+
+                    except Exception as e:
+                        logger.error(f"处理笔记 {note_id} 时发生错误: {e}")
+                        continue
+                
+                if not response_data.get("has_more"):
+                    logger.info(f"关键词 '{keyword}' 已搜索完毕。")
+                    break
+                
+                page_num += 1
+                await asyncio.sleep(random.uniform(5, 10))
+        
+        # 保存标注文件
+        if annotations:
+            with open(os.path.join("data", "annotations.json"), "w", encoding="utf-8") as f:
+                json.dump(annotations, f, ensure_ascii=False, indent=4)
+            logger.info(f"标注文件 annotations.json 已保存，共包含 {len(annotations)} 条记录。")
+        else:
+            logger.warning("没有生成任何标注数据。")
 
     async def start(self):
         logger.info("开始启动小红书爬虫...")
@@ -346,6 +530,8 @@ if __name__ == '__main__':
         crawler = XhsCrawler()
         asyncio.run(crawler.start())
         logger.info("脚本执行完毕。")
+    except KeyboardInterrupt:
+        logger.warning("脚本被用户手动中断。")
     except Exception as e:
         logger.error(f"在脚本顶层捕获到异常: {e}")
         import traceback
