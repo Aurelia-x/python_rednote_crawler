@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import random
+import re
 from typing import Any, Dict, Optional
 from urllib.parse import quote
 import httpx
@@ -239,6 +240,13 @@ class XhsCrawler:
                         title = note_card.get("title", "")
                         image_list = note_card.get("image_list", [])
 
+                        # --- 数据过滤：文本标注不少于10个中文字符 ---
+                        chinese_char_count = len(re.findall(r'[\u4e00-\u9fa5]', text_content))
+                        if chinese_char_count < 10:
+                            logger.warning(f"笔记 {note_id} 中文字符数不足 ({chinese_char_count} < 10)，跳过。")
+                            continue
+                        # ----------------------------------------
+
                         # 提取用户信息
                         user_info = note_card.get("user", {})
                         user_data = {
@@ -278,6 +286,14 @@ class XhsCrawler:
                         
                         note_success = False
                         for img_info in image_list:
+                            # --- 数据过滤：图像分辨率不低于500p ---
+                            width = img_info.get("width", 0)
+                            height = img_info.get("height", 0)
+                            if width < 500 or height < 500:
+                                logger.warning(f"图片分辨率过低 ({width}x{height})，跳过: {img_info.get('url', '')[:30]}...")
+                                continue
+                            # ------------------------------------
+
                             # 优先获取 url，如果没有则尝试 url_default (通常是高质量图)，最后尝试 url_pre
                             img_url = img_info.get("url") or img_info.get("url_default") or img_info.get("url_pre")
                             if not img_url:
