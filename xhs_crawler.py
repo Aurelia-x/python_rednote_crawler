@@ -528,7 +528,7 @@ class XhsCrawler:
 
 if __name__ == '__main__':
     # --- 配置区域 ---
-    SEARCH_KEYWORDS = ["爬虫"]  # 搜索关键词列表，例如 ["Python", "机器学习"]
+    SEARCH_KEYWORDS = ["网购 退货 拆快递 六格"]  # 搜索关键词列表，例如 ["Python", "机器学习"]
     MAX_NOTES_COUNT = 10       # 想要爬取的帖子总数量
     # ----------------
 
