@@ -207,8 +207,9 @@ async def sign_with_playwright(page: Page, uri: str, data: Optional[Union[Dict, 
 # --- 主爬虫类 ---
 
 class XhsCrawler:
-    def __init__(self):
-        self.keywords = ["爬虫"]
+    def __init__(self, keywords=None, max_notes_count=10):
+        self.keywords = keywords if keywords else ["爬虫"]
+        self.max_notes_count = max_notes_count
         self.cookie_path = "cookies.json"
         self.browser = None
         self.context = None
@@ -327,13 +328,13 @@ class XhsCrawler:
         os.makedirs(data_dir, exist_ok=True)
 
         for keyword in self.keywords:
-            if processed_notes_count >= 10:
+            if processed_notes_count >= self.max_notes_count:
                 break
 
             page_num = 1
             search_id = "".join(random.choice("0123456789abcdef") for _ in range(32))
             while True:
-                if processed_notes_count >= 10:
+                if processed_notes_count >= self.max_notes_count:
                     break
                 logger.info(f"正在 API 搜索 '{keyword}' 的第 {page_num} 页...")
                 
@@ -380,7 +381,7 @@ class XhsCrawler:
                 for item in response_data.get("items", []):
                     if item.get("model_type") != "note":
                         continue
-                    if processed_notes_count >= 10:
+                    if processed_notes_count >= self.max_notes_count:
                         break
                     note_id = item.get("id")
                     if '#' in note_id:
@@ -526,8 +527,13 @@ class XhsCrawler:
             logger.info("浏览器已关闭。")
 
 if __name__ == '__main__':
+    # --- 配置区域 ---
+    SEARCH_KEYWORDS = ["爬虫"]  # 搜索关键词列表，例如 ["Python", "机器学习"]
+    MAX_NOTES_COUNT = 10       # 想要爬取的帖子总数量
+    # ----------------
+
     try:
-        crawler = XhsCrawler()
+        crawler = XhsCrawler(keywords=SEARCH_KEYWORDS, max_notes_count=MAX_NOTES_COUNT)
         asyncio.run(crawler.start())
         logger.info("脚本执行完毕。")
     except KeyboardInterrupt:
