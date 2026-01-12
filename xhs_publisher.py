@@ -4,7 +4,7 @@ import os
 import re
 import base64
 import httpx
-from typing import List, Dict, Union, Optional
+from typing import List, Dict
 from playwright.async_api import async_playwright, Page, BrowserContext, expect
 from loguru import logger
 

@@ -1,10 +1,9 @@
-
 import asyncio
 import json
 import os
 import random
 import re
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 from urllib.parse import quote
 import httpx
 from playwright.async_api import async_playwright
@@ -13,12 +12,81 @@ from xhs_sign_utils import sign_with_playwright
 
 # --- 主爬虫类 ---
 
+class Visualizer:
+    """
+    演示模式可视化控制器
+    负责在独立的页面中展示爬虫动作，不阻塞主爬虫流程
+    """
+    def __init__(self, context):
+        self.context = context
+        self.page = None
+        self.queue = asyncio.Queue()
+        self.worker_task = None
+
+    async def start(self):
+        self.page = await self.context.new_page()
+        self.worker_task = asyncio.create_task(self._worker())
+
+    async def _worker(self):
+        while True:
+            action = await self.queue.get()
+            try:
+                await action()
+            except Exception as e:
+                logger.warning(f"演示动作执行失败: {e}")
+            finally:
+                self.queue.task_done()
+
+    def show_search_page(self, keyword):
+        async def _action():
+            if not self.page: return
+            try:
+                await self.page.bring_to_front()
+                search_url = f"https://www.xiaohongshu.com/search_result?keyword={quote(keyword)}&source=web_search_result_notes"
+                logger.info(f"正在跳转到搜索页面: {search_url}")
+                await self.page.goto(search_url)
+                await asyncio.sleep(2) # 等待页面加载，展示效果
+            except Exception as e:
+                logger.warning(f"跳转搜索页面失败: {e}")
+        
+        self.queue.put_nowait(_action)
+
+    def show_note_detail(self, note_id, xsec_token):
+        async def _action():
+            if not self.page: return
+            try:
+                await self.page.bring_to_front()
+                detail_url = f"https://www.xiaohongshu.com/explore/{note_id}?xsec_token={xsec_token}&xsec_source=pc_search"
+                logger.info(f"正在跳转到详情页: {detail_url}")
+                await self.page.goto(detail_url)
+                await asyncio.sleep(2)
+            except Exception as e:
+                logger.warning(f"跳转详情页失败: {e}")
+        
+        self.queue.put_nowait(_action)
+
+    async def stop(self):
+        if self.worker_task:
+            # 等待所有任务完成
+            if not self.queue.empty():
+                logger.info("正在等待演示任务完成...")
+                await self.queue.join()
+            
+            self.worker_task.cancel()
+            try:
+                await self.worker_task
+            except asyncio.CancelledError:
+                pass
+        
+        if self.page:
+            await self.page.close()
+
 class XhsCrawler:
     """
     小红书爬虫类
     负责登录、搜索关键词、解析笔记详情及下载图片
     """
-    def __init__(self, keywords=None, max_notes_count=10):
+    def __init__(self, keywords=None, max_notes_count=10, display_mode=False, display_id=None):
         self.keywords = keywords if keywords else ["爬虫"]
         self.max_notes_count = max_notes_count
         self.cookie_path = "cookies.json"
@@ -27,6 +95,9 @@ class XhsCrawler:
         self.page = None
         self.cookie_dict = {}
         self._host = "https://edith.xiaohongshu.com"
+        self.display_mode = display_mode
+        self.display_id = display_id
+        self.visualizer = None
 
     async def _login_with_cookies(self) -> bool:
         """
@@ -149,10 +220,8 @@ class XhsCrawler:
 
             # --- 演示用：跳转到搜索页面 ---
             try:
-                search_url = f"https://www.xiaohongshu.com/search_result?keyword={quote(keyword)}&source=web_search_result_notes"
-                logger.info(f"演示：正在跳转到搜索页面: {search_url}")
-                await self.page.goto(search_url)
-                await asyncio.sleep(random.uniform(3, 5)) # 等待页面加载，展示效果
+                if self.display_mode and self.visualizer:
+                    self.visualizer.show_search_page(keyword)
             except Exception as e:
                 logger.warning(f"跳转搜索页面失败: {e}")
             # ---------------------------
@@ -210,6 +279,8 @@ class XhsCrawler:
                     if processed_notes_count >= self.max_notes_count:
                         break
                     note_id = item.get("id")
+                    if self.display_mode and note_id != self.display_id:
+                        continue
                     if '#' in note_id:
                         note_id = note_id.split('#')[0]
                     xsec_token = item.get("xsec_token") # 提取 xsec_token
@@ -218,14 +289,12 @@ class XhsCrawler:
                     
                     try:
                         # --- 演示用：跳转到详情页（已注释） ---
-                        # detail_url = f"https://www.xiaohongshu.com/explore/{note_id}"
-                        # logger.info(f"演示：正在跳转到详情页: {detail_url}")
-                        # await self.page.goto(detail_url)
-                        # await asyncio.sleep(random.uniform(3, 5))
+                        if self.display_mode and self.visualizer:   
+                            self.visualizer.show_note_detail(note_id, xsec_token)
                         # ----------------------------------
 
                         logger.info(f"准备获取笔记 {note_id} 的详情...")
-                        # await asyncio.sleep(random.uniform(3, 6))
+
                         # 3. 传入 xsec_token 获取详情
                         detail_data = await self.get_note_detail(note_id, xsec_token)
                         if not detail_data:
@@ -300,7 +369,7 @@ class XhsCrawler:
                                 logger.warning(f"图片信息中未找到有效URL: {img_info}")
                                 continue
                             
-                            # await asyncio.sleep(random.uniform(2, 4))
+
                             async with httpx.AsyncClient() as client:
                                 img_response = await client.get(img_url, timeout=60)
                             img_response.raise_for_status()
@@ -334,6 +403,9 @@ class XhsCrawler:
                             logger.info(f"成功下载图片 {relative_path}，当前图文对: {image_count}")
                             note_success = True
                         
+                        if self.display_mode and note_success:
+                            logger.info(f"关键词 '{keyword}' 已处理1条笔记: {note_id}")
+                            break
                         if note_success:
                             processed_notes_count += 1
                             logger.info(f"关键词 '{keyword}' 已处理 {processed_notes_count}/{self.max_notes_count} 条笔记: {note_id}")
@@ -343,13 +415,15 @@ class XhsCrawler:
                     except Exception as e:
                         logger.error(f"处理笔记 {note_id} 时发生错误: {e}")
                         continue
-                
+                if self.display_mode:
+                    logger.info(f"演示笔记已爬取完毕")
+                    break
                 if not response_data.get("has_more"):
                     logger.info(f"关键词 '{keyword}' 已搜索完毕。")
                     break
                 
                 page_num += 1
-                # await asyncio.sleep(random.uniform(5, 10))
+
         
         # 保存标注文件
         if annotations:
@@ -363,27 +437,38 @@ class XhsCrawler:
         """
         启动爬虫流程
         """
-        logger.info("开始启动小红书爬虫...")
+        logger.info("开始启动小红书爬虫...准备登录中")
         async with async_playwright() as p:
             self.browser = await p.chromium.launch(headless=False)
             self.context = await self.browser.new_context()
             
+            if self.display_mode:
+                self.visualizer = Visualizer(self.context)
+                await self.visualizer.start()
+
             if await self._login_with_cookies():
                 await self.search()
             else:
                 logger.error("因登录失败，程序即将退出。")
             
+            if self.visualizer:
+                await self.visualizer.stop()
+
             await self.browser.close()
             logger.info("浏览器已关闭。")
 
 if __name__ == '__main__':
     # --- 配置区域 ---
-    SEARCH_KEYWORDS = ["网购题材手绘漫画","退货题材手绘漫画","拆快递题材手绘漫画"]  # 搜索关键词列表
+    # SEARCH_KEYWORDS = ["网购题材手绘漫画","退货题材手绘漫画","拆快递题材手绘漫画"]  # 搜索关键词列表
+    TEST_SEARCH_KEYWORDS = ["网购题材手绘漫画"]  # 测试用搜索关键词列表
     MAX_NOTES_COUNT = 10       # 想要爬取的帖子总数量
     # ----------------
 
     try:
-        crawler = XhsCrawler(keywords=SEARCH_KEYWORDS, max_notes_count=MAX_NOTES_COUNT)
+        crawler = XhsCrawler(display_id="648681a8000000001303679a", 
+                            keywords=TEST_SEARCH_KEYWORDS, 
+                            max_notes_count=MAX_NOTES_COUNT, 
+                            display_mode=True)
         asyncio.run(crawler.start())
         logger.info("脚本执行完毕。")
     except KeyboardInterrupt:
