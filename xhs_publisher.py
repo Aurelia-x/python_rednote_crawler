@@ -77,6 +77,10 @@ async def generate_ai_copywriting(api_key: str, image_paths: List[str], original
     """
     content.append({"text": prompt})
 
+    # 构建请求 Payload
+    # model: 指定使用的模型，这里使用 qwen-vl-max，支持图文理解
+    # input.messages: 对话历史，包含图片和文本
+    # parameters.result_format: 设置为 message 格式返回
     payload = {
         "model": "qwen-vl-max",
         "input": {
@@ -112,7 +116,7 @@ async def generate_ai_copywriting(api_key: str, image_paths: List[str], original
                 except json.JSONDecodeError:
                     # 如果不是标准 JSON，尝试手动提取或直接作为 content
                     logger.warning("AI 返回的不是标准 JSON，将直接使用返回文本。")
-                    # 简单分割标题和内容
+                    # 分割标题和内容
                     lines = ai_text.split("\n", 1)
                     return {
                         "title": lines[0].strip()[:20], # 截取一下防止过长
@@ -132,7 +136,12 @@ class XhsPublisher:
     """
     小红书自动发布器。
     
-    使用 Playwright 模拟浏览器操作，实现自动登录检测、图片上传、文案填充等功能。
+    设计目的:
+        自动化小红书网页版的笔记发布流程，包括上传图片、填写标题/内容、设置话题等。
+        
+    技术实现:
+        使用 Playwright 模拟真实浏览器操作，通过 Cookies 实现免登录。
+        特别处理了文件上传控件的交互和页面跳转逻辑。
     """
     
     def __init__(self, cookie_file: str = "cookies.json"):
@@ -168,6 +177,7 @@ class XhsPublisher:
         
         # 注入脚本以屏蔽地理位置权限弹窗 (模拟“一律不允许”)
         # 覆盖 navigator.geolocation 方法，使其直接报错或返回拒绝
+        # 这样可以避免浏览器弹出“想要获取您的位置”的提示框干扰流程
         await self.browser_context.add_init_script("""
             navigator.geolocation.getCurrentPosition = (success, error, options) => {
                 if (error) {
@@ -231,6 +241,16 @@ class XhsPublisher:
     async def publish_note(self, image_paths: List[str], title: str, content: str, dry_run: bool = False):
         """
         发布图文笔记的主逻辑。
+        
+        流程:
+        1. 验证登录状态。
+        2. 点击侧边栏"发布"按钮，跳转到创作中心。
+        3. 切换到"上传图文"模式（默认可能是视频）。
+        4. 操作 input[type=file] 控件上传多张图片。
+        5. 等待图片预览加载完成。
+        6. 填写标题和正文。
+        7. 勾选"内容来源声明"（防止被限流）。
+        8. 点击"发布"按钮（dry_run=True 时跳过）。
         
         Args:
             image_paths (List[str]): 图片文件的绝对路径列表。
@@ -394,6 +414,19 @@ class XhsPublisher:
 async def main():
     """
     主函数：编排整个发布流程。
+    
+    流程:
+    1. 准备数据：
+       - 读取环境变量 (API Key)。
+       - 指定要发布的 note_id。
+       - 扫描对应的本地图片目录。
+       - 从 annotations.json 读取元数据（标题、内容、作者）。
+    2. 文案生成 (AI):
+       - 调用 Qwen-VL 生成更具吸引力的二创文案。
+    3. 启动发布器:
+       - 启动浏览器。
+       - 登录。
+       - 执行发布 (dry_run=True 演示模式)。
     """
     # 是否启用AI生成文案功能
     ENABLE_AI = True
@@ -438,10 +471,11 @@ async def main():
                     content = note_content.get("desc", "")
                     
                     # 移除原话题标签 (井号包裹的内容)
+                    # 避免旧的标签干扰 AI 的理解，和直接复用旧标签
                     content = re.sub(r"#[^#]+#", "", content)
                     content = content.strip()
                     
-                    # 获取原作者和链接
+                    # 获取原作者和链接，用于生成版权声明
                     nickname = value.get("user", {}).get("nickname", "未知作者")
                     url = value.get("info", {}).get("url", "")
                     
