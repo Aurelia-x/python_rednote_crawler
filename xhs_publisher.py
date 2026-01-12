@@ -1,15 +1,12 @@
 import asyncio
 import json
 import os
-import time
 import re
 import base64
 import httpx
 from typing import List, Dict, Union, Optional
 from playwright.async_api import async_playwright, Page, BrowserContext, expect
 from loguru import logger
-
-
 
 def load_env(env_path=".env"):
     """
@@ -149,10 +146,13 @@ class XhsPublisher:
         self.browser_context: BrowserContext = None
         self.page: Page = None
 
-    async def start(self):
+    async def start(self, playwright):
         """
         启动浏览器并加载 Cookies。
         
+        Args:
+            playwright: Playwright 实例
+            
         包括：
         1. 启动 Playwright Chromium 浏览器（有头模式）。
         2. 创建浏览器上下文。
@@ -160,7 +160,6 @@ class XhsPublisher:
         4. 从文件加载 Cookies 并注入到上下文。
         5. 创建新页面。
         """
-        playwright = await async_playwright().start()
         # 启动浏览器
         browser = await playwright.chromium.launch(headless=False)
         
@@ -396,6 +395,8 @@ async def main():
     """
     主函数：编排整个发布流程。
     """
+    # 是否启用AI生成文案功能
+    ENABLE_AI = True
     # 加载环境变量
     load_env()
     api_key = os.environ.get("API_KEY")
@@ -445,7 +446,7 @@ async def main():
                     url = value.get("info", {}).get("url", "")
                     
                     # 调用 AI 生成新文案
-                    if api_key and images:
+                    if ENABLE_AI and api_key and images:
                         ai_result = await generate_ai_copywriting(api_key, images, title, content)
                         if ai_result:
                             title = ai_result.get("title", title)
@@ -472,26 +473,27 @@ async def main():
     
     # 数据准备完成后，再启动浏览器
     logger.info("数据准备完成，启动浏览器...")
-    publisher = XhsPublisher()
-    await publisher.start()
+    async with async_playwright() as playwright:
+        publisher = XhsPublisher()
+        await publisher.start(playwright)
 
-    if images:
-        logger.info(f"找到 {len(images)} 张图片: {images}")
-        # dry_run=True 表示只填充不发布
-        await publisher.publish_note(
-            image_paths=images,
-            title=title,
-            content=content,
-            dry_run=False 
-        )
-    else:
-        logger.warning(f"未在 {image_dir} 找到图片，仅启动浏览器演示登录。")
-        await publisher.check_login()
+        if images:
+            logger.info(f"找到 {len(images)} 张图片: {images}")
+            # dry_run=True 表示只填充不发布
+            await publisher.publish_note(
+                image_paths=images,
+                title=title,
+                content=content,
+                dry_run=True 
+            )
+        else:
+            logger.warning(f"未在 {image_dir} 找到图片，仅启动浏览器演示登录。")
+            await publisher.check_login()
 
-    # 保持浏览器打开一会以便观察
-    logger.info("脚本执行完毕，浏览器将保持打开状态 120 秒...")
-    await asyncio.sleep(120)
-    await publisher.close()
+        # 保持浏览器打开一会以便观察
+        logger.info("脚本执行完毕，浏览器将保持打开状态 120 秒...")
+        await asyncio.sleep(120)
+        await publisher.close()
 
 if __name__ == "__main__":
     try:
