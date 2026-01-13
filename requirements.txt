@@ -1,5 +1,4 @@
-selenium
-requests
+playwright
+httpx
+loguru
 Pillow
-webdriver-manager
-pyautogui
