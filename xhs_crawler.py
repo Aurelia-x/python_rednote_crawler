@@ -147,7 +147,7 @@ class XhsCrawler:
     - Playwright 用于环境模拟和签名生成（解决 JS 加密难题）。
     - HTTP API (httpx) 用于数据传输（提高爬取速度）。
     """
-    def __init__(self, keywords=None, max_notes_count=10, display_mode=False, display_id=None):
+    def __init__(self, keywords=None, max_notes_count=10, display_mode=False, display_id=None, enable_filtering=True):
         """
         初始化爬虫
         
@@ -156,6 +156,7 @@ class XhsCrawler:
             max_notes_count: 每个关键词最大爬取笔记数量
             display_mode: 是否开启演示模式（可视化展示）
             display_id: 仅演示特定 ID 的笔记（调试用）
+            enable_filtering: 是否开启关键词相关性过滤
         """
         self.keywords = keywords if keywords else ["爬虫"]
         self.max_notes_count = max_notes_count
@@ -167,7 +168,36 @@ class XhsCrawler:
         self._host = "https://edith.xiaohongshu.com" # 小红书 API 域名
         self.display_mode = display_mode
         self.display_id = display_id
+        self.enable_filtering = enable_filtering
         self.visualizer = None
+        
+        # 定义高级过滤规则
+        # 格式: keyword -> { groups: [[必须包含组1], [必须包含组2]], exclude: [排除词] }
+        # 逻辑: (组1中任一词命中) AND (组2中任一词命中) AND (排除词均未命中)
+        common_style_group = ["漫画", "手绘", "画画", "插画", "简笔画", "条漫", "四格", "六格"]
+        self.filter_rules = {
+            "网购题材手绘漫画": {
+                "groups": [
+                    ["网购", "淘宝", "购物", "买东西", "下单", "电商", "买家秀"],
+                    common_style_group
+                ],
+                "exclude": ["教程", "招聘", "代画"]
+            },
+            "退货题材手绘漫画": {
+                "groups": [
+                    ["退货", "退款", "避雷", "踩雷", "售后", "差评", "商家"],
+                    common_style_group
+                ],
+                "exclude": ["教程", "招聘", "代画"]
+            },
+            "拆快递题材手绘漫画": {
+                "groups": [
+                    ["拆快递", "快递", "拆箱", "包裹", "开箱", "取快递"],
+                    common_style_group
+                ],
+                "exclude": ["教程", "招聘", "代画"]
+            }
+        }
 
     async def _login_with_cookies(self) -> bool:
         """
@@ -478,6 +508,74 @@ class XhsCrawler:
                         # 提取标签
                         tag_list = note_card.get("tag_list", [])
                         tags = [tag.get("name") for tag in tag_list if tag.get("name")]
+
+                        # --- 关键词相关性过滤 ---
+                        if self.enable_filtering:
+                            relevant = False
+                            
+                            # 检查是否有针对该关键词的高级过滤规则
+                            if keyword in self.filter_rules:
+                                rule = self.filter_rules[keyword]
+                                groups = rule.get("groups", [])
+                                exclude_words = rule.get("exclude", [])
+                                
+                                # 1. 黑名单检查 (如果有任一排除词，直接不相关)
+                                is_excluded = False
+                                content_to_check = (title + text_content + "".join(tags)).lower()
+                                for bad_word in exclude_words:
+                                    if bad_word.lower() in content_to_check:
+                                        is_excluded = True
+                                        logger.warning(f"笔记 {note_id} 包含排除词 '{bad_word}'，跳过。")
+                                        break
+                                
+                                if is_excluded:
+                                    continue # 直接跳过本轮循环
+                                    
+                                # 2. 分组交叉匹配
+                                # 必须满足：每个组中至少有一个词命中
+                                all_groups_matched = True
+                                for group in groups:
+                                    group_matched = False
+                                    for word in group:
+                                        word_lower = word.lower()
+                                        # 检查标题、正文
+                                        if word_lower in title.lower() or word_lower in text_content.lower():
+                                            group_matched = True
+                                            break
+                                        # 检查标签
+                                        for tag in tags:
+                                            if word_lower in tag.lower():
+                                                group_matched = True
+                                                break
+                                        if group_matched:
+                                            break
+                                    
+                                    if not group_matched:
+                                        all_groups_matched = False
+                                        break # 只要有一个组没命中，就不满足条件
+                                
+                                if all_groups_matched:
+                                    relevant = True
+                                    logger.info(f"笔记 {note_id} 通过高级过滤规则匹配。")
+                                else:
+                                    logger.warning(f"笔记 {note_id} 未满足高级过滤规则的所有分组条件，跳过。")
+
+                            else:
+                                # 默认简单过滤逻辑
+                                kw_lower = keyword.lower()
+                                if kw_lower in title.lower() or kw_lower in text_content.lower():
+                                    relevant = True
+                                else:
+                                    for tag in tags:
+                                        if kw_lower in tag.lower():
+                                            relevant = True
+                                            break
+                                if not relevant:
+                                    logger.warning(f"笔记 {note_id} 与关键词 '{keyword}' 不相关（默认逻辑），跳过。")
+                            
+                            if not relevant:
+                                continue
+                        # -----------------------
                         
                         # 提取其他元数据
                         publish_time = note_card.get("time") or note_card.get("publish_time")
@@ -610,14 +708,16 @@ if __name__ == '__main__':
     # --- 配置区域 ---
     SEARCH_KEYWORDS = ["网购题材手绘漫画","退货题材手绘漫画","拆快递题材手绘漫画"]  # 搜索关键词列表
     TEST_SEARCH_KEYWORDS = ["网购题材手绘漫画"]  # 演示用搜索关键词列表
-    MAX_NOTES_COUNT = 10       # 想要爬取的帖子总数量
+    MAX_NOTES_COUNT = 15       # 想要爬取的帖子总数量
+    ENABLE_FILTERING = False    # 是否开启关键词相关性过滤（True=开启，False=关闭）
     # ----------------
 
     try:
         crawler = XhsCrawler( 
                             keywords=SEARCH_KEYWORDS, 
                             max_notes_count=MAX_NOTES_COUNT, 
-                            display_mode=False)
+                            display_mode=False,
+                            enable_filtering=ENABLE_FILTERING)
         asyncio.run(crawler.start())
         logger.info("脚本执行完毕。")
     except KeyboardInterrupt:
