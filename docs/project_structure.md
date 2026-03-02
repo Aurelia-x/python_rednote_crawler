@@ -13,27 +13,15 @@ project_root/
 │   └── annotations.json   # 最终数据的标注信息文件
 │
 ├── docs/                  # 项目文档目录
-│   ├── problem.md         # 问题记录与分析
-│   ├── todo.md            # 待办事项列表
-│   ├── 发布设计思路.md     # 自动发布功能的设计文档
+│   ├── 发布端设计思路.md    # 自动发布功能的设计文档
 │   ├── 自动发布问题与解决方案.md # 发布过程中的问题与解决
-│   ├── 设计思路.md         # 整体项目设计思路
-│   ├── 问题与解决方案.md    # 通用问题与解决方案记录
+│   ├── 采集端设计思路.md        # 爬虫采集端设计思路
+│   ├── 爬虫问题与解决方案.md    # 爬虫问题与解决方案记录
 │   └── project_structure.md # 本文件：项目文件结构说明
-│
-├── test/                  # 测试与实验性代码目录
-│   ├── baidu_crawler.py   # 百度图片爬虫测试脚本
-│   ├── crawler.py         # 通用爬虫测试脚本
-│   ├── merge.py           # 代码/数据合并测试脚本
-│   ├── processor.py       # 数据处理流程测试
-│   ├── publisher.py       # 发布功能测试脚本
-│   └── xhs_test.py        # 小红书相关功能测试
 │
 ├── add_to_final.py        # 数据迁移工具：将选定的 data 数据添加到 data_final
 ├── archive_data.py        # 数据归档工具：将 data 目录下的数据归档到 data_past (按时间戳)
-├── filter_data_final.py   # 数据过滤工具：对 data_final 中的数据进行清洗 (如去除无效数据)
 ├── get_cookies.py         # Cookie 获取工具：启动浏览器手动登录以获取小红书 Cookies
-├── reference.py           # 参考代码：包含 Selenium 等相关实现的参考片段
 ├── requirements.txt       # 项目依赖清单
 ├── .env                   # 环境变量配置文件 (API Key 等)
 ├── cookies.json           # 小红书登录 Cookie 文件
